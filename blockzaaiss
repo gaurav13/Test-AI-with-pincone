@@ -1,424 +1,1518 @@
 <?php
-//include 'config.php';
-$host = "localhost";
-$username = "mfjbntqvhr"; 
-$password = "ayZ7QY4wHx";
-$database = "mfjbntqvhr";
-// Match coin name or symbol from user input
-$conn = new mysqli($host, $username, $password, $database);
-$ip = $_SERVER['REMOTE_ADDR'];
+/**
+ *
+ */
 
-$OPENAI_API_KEY = '';
-$pdo = new PDO("mysql:host=localhost;dbname=mfjbntqvhr", "mfjbntqvhr", "ayZ7QY4wHx");
+ini_set('display_errors', '0');
+error_reporting(E_ALL);
 
+// -------------------------------------------------------------------
+// Configuration
+// -------------------------------------------------------------------
+$OPENAI_API_KEY       = trim(getenv('OPENAI_API_KEY')       ?: '');
+$OPENAI_EMBED_MODEL   = getenv('OPENAI_EMBEDDING_MODEL') ?: '';
+$OPENAI_CHAT_MODEL    = getenv('OPENAI_CHAT_MODEL')    ?: '';
+$PINECONE_API_KEY     = getenv('PINECONE_API_KEY')     ?: '';
+$PINECONE_HOST        = rtrim(getenv('PINECONE_HOST') ?: '', '/');
 
-
-// MAIN
-$query = $_GET['q'] ?? '';
-//$query = correct_query($query);
-if (!$query) {
-    echo json_encode(["response" => "No question received."]);
-    exit;
-}
-$type = classify_query_type($query);
-$serverTime = date('Y-m-d');
-  $stmt = $conn->prepare("SELECT message_count,ip_address,user_date FROM prediction_chat_users WHERE ip_address = ?");
-    $query = $_GET['q'];
-    $stmt->bind_param("s", $ip);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $row = $result->fetch_assoc();
-if ($row && (is_null($row['user_date']) || $serverTime !== $row['user_date'])) {
-    $stmt1 = $conn->prepare("UPDATE prediction_chat_users SET user_date = ?,message_count='0'  WHERE ip_address = ?");
-    $stmt1->bind_param("ss", $serverTime, $ip);
-    $stmt1->execute();
-	$stmt = $conn->prepare("SELECT message_count, ip_address, user_date FROM prediction_chat_users WHERE ip_address = ?");
-    $stmt->bind_param("s", $ip);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $row = $result->fetch_assoc();
-//	error_log("User Date: " . var_export($row['user_date'], true));
-//error_log("Server Date: " . $serverTime);
-
-}
- 
-	function get_embedding($text) {
-	$OPENAI_API_KEY = '';
-    $ch = curl_init('https://api.openai.com/v1/embeddings');
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POSTFIELDS => json_encode([
-            "input" => $text,
-            "model" => "text-embedding-ada-002"
-        ]),
-        CURLOPT_HTTPHEADER => [
-            "Authorization: Bearer " . $OPENAI_API_KEY,
-            "Content-Type: application/json"
-        ]
-    ]);
-    $response = curl_exec($ch);
-    curl_close($ch);
-    $data = json_decode($response, true);
-	file_put_contents('embedding_debug.log', print_r($data, true), FILE_APPEND);
-
-    return $data['data'][0]['embedding'] ?? [];
-}
-
-function cosine_similarity($a, $b) {
-    $dot = $magA = $magB = 0;
-    for ($i = 0; $i < count($a); $i++) {
-        $dot += $a[$i] * $b[$i];
-        $magA += $a[$i] ** 2;
-        $magB += $b[$i] ** 2;
-    }
-    return ($magA && $magB) ? $dot / (sqrt($magA) * sqrt($magB)) : 0;
-}
-
-function ask_chatgpt($query, $context) {
-	$OPENAI_API_KEY = '';
-$payload = [ 
-  "model" => "gpt-4o",
-  "messages" => [
-    [ 
-      "role" => "system",
-      "content" => <<<EOT
-You are a professional AI assistant for Blockza — a Web3 platform offering AI-powered company directories, partner discovery, and meeting booking.
-
-🎯 Your response must be formatted using clean Bootstrap 5-compatible HTML, styled like https://blockza.io.
-
-⚠️ IMPORTANT:
-- Your first priority is to directly and professionally answer the user's question in a clear and well structured way use bootstrap for it.
-- Use bullet points, short paragraphs, and emphasize the benefit of using Blockza features such as directory listings, meeting bookings, visibility, or tools.
-- After the main response, you may display "Similar Companies of [CATEGORY]".
-
-✅ Guidelines:
-- Use one font-size 16px and one font-family 
-- Do NOT show random company profile unless specifically asked.
-- Do NOT skip the main answer.
-- Do NOT wrap output in code blocks like ```html.
-- Avoid repeating "Sorry" or generic statements if confident context exists.
-- - If a user asks about any specific category — including: Blockchain, Web3, Crypto, DeFi, DAO, Metaverse, NFT, Blockchain Game, or AI — return a list of 15 relevant companies from that category using the Bootstrap 5-compatible HTML format provided below.
-
-<div class='d-flex align-items-center mb-3'>
-  <img src='LOGO_URL' class='me-3' style='width:60px; height:60px; border-radius:50%;'>
-  <div>
-    <h3 class='mb-1'>Company Name</h3>
-    <p class='text-muted mb-0'>Short tagline or summary of the company</p>
-  </div>
-</div>
-<p>Detailed overview of the company's mission, technology, services, and goals.</p>
-<div class='mt-3'>
-  <a href='[DirectoryLink]' target='_blank' class='btn btn-outline-primary btn-sm me-2'>View Directory</a>
-</div>
----
-
-
-- Heading: <h4><i class="bi bi-people-fill"></i> Team</h4>
-- Inside <div class='row row-cols-1 row-cols-sm-2 row-cols-md-3 g-4'>
-- Each team member should appear as a <div class='col'> with a card:
-  - Use <div class='card text-center h-100'>
-  - Include:
-    - Profile image in <img src='IMAGE_URL'  >
-    - Full Name in <h5>
-    - Role in <p class='text-muted'>
-    - Optional description or quote in <p>
-    - Book button:
-      <strong id=\"BookMeeting_[Name]\" data-name=\"Name\" class=\"btn  btn-sm  btn-outline-primary m-2 cursor-pointer\">Book a Meeting</strong>
- 
-
----
-
-
-- Heading: <h4 class="pt-4"><i class="bi bi-building"></i> Similar Companies of [CATEGORY]</h4>
-<div class='row'><div class='col-12 col-sm-6 col-md-4 pb-4'>
-  <div class='card h-100 shadow-sm border-0'>
-    <!-- Optional Banner -->
-    <img src='BANNER_IMAGE_URL' class='card-img-top' alt='Company Banner'>
-
-    <div class='card-body'>
-      <h5 class='card-title mb-1'>Company Name</h5>
-      <p class='text-muted small mb-2'>Short company description...</p>
-
-      <!-- CTA -->
-      <a href='[DirectoryLink]' target='_blank' class='btn btn-outline-secondary btn-sm mt-2'>View Directory</a>
-    </div>
-  </div>
-</div>
-
-
-
-2. Related company section:
-<h4 class="pt-4"><i class="bi bi-building"></i> Similar Companies of [CATEGORY]</h4>
-<div class='row'><div class='col-12 col-sm-6 col-md-4 pb-4'>
-  <div class='card h-100 shadow-sm border-0'>
-    <img src='BANNER_IMAGE_URL' class='card-img-top' alt='Company Banner'>
-    <div class='card-body'>
-      <h5 class='card-title mb-1'>Company Name</h5>
-      <p class='text-muted small mb-2'>Short company description...</p>
-      <a href='[DirectoryLink]' target='_blank' class='btn btn-outline-secondary btn-sm mt-2'>View Directory</a>
-    </div>
-  </div>
-</div></div>
-
-🚫 Do not include personal emails, phone numbers, or LinkedIn.
-✅ Promote the “Book a Meeting” button where relevant.
-EOT
-    ],
-    [ 
-      "role" => "user",
-      "content" => "Context: $context\n\nUser question: $query"
-    ]
-  ]
+$DEFAULT_SUGGESTIONS = [
+    'What upcoming Web3 opportunities should I watch?',
+    'How can Blockza help me discover partners faster?',
+    'Which Blockza tools drive community growth?',
 ];
 
+// -------------------------------------------------------------------
+// CORS boilerplate
+// -------------------------------------------------------------------
+$allowedOrigins = [
+    'https://blockza.io',
+    'https://www.blockza.io',
+    'https://blockza.ai',
+    'https://www.blockza.ai',
+    'http://localhost:3000',
+    'http://localhost:5173',
+];
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
-
-
-
-
-
-    $ch = curl_init("https://api.openai.com/v1/chat/completions");
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POSTFIELDS => json_encode($payload),
-        CURLOPT_HTTPHEADER => [
-            "Authorization: Bearer " . $OPENAI_API_KEY,
-            "Content-Type: application/json"
-        ]
-    ]);
-    $response = curl_exec($ch);
-    curl_close($ch);
-    $data = json_decode($response, true);
-	file_put_contents('embedding_debug.log', print_r($data, true), FILE_APPEND);
-
-    return $data['choices'][0]['message']['content'] ?? "Sorry, I couldn't find the answer.";
-}
-$userEmbedding = get_embedding($query);
-
-$stmt = $pdo->prepare("SELECT * FROM vector_knowledge_new WHERE MATCH(context) AGAINST (:query IN NATURAL LANGUAGE MODE) LIMIT 30");
-$stmt->execute([':query' => $query]);
-
-$bestMatch = null;
-$bestScore = 0;
-
-while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-    $dbEmbedding = json_decode($row['embedding'], true);
-    $score = cosine_similarity($userEmbedding, $dbEmbedding);
-    if ($score > $bestScore) {
-        $bestScore = $score;
-        $bestMatch = $row;
-    }
-}
-
-if ($bestScore < 0.65 || !$bestMatch) {
-    // Fallback to full AI answer using GPT if no good embedding match found
-    $fallbackContext = "Note: The database didn't return a confident match for the user's query.\n\nTry your best to answer based on your AI knowledge. Make sure to stay relevant to the Web3 space.";
-    $reply = ask_chatgpt($query, $fallbackContext);
-
-    echo json_encode([
-        "matched" => "AI Generated",
-        "score" => round($bestScore, 4),
-        "response" => $reply,
-        "related_companies" => []
-    ]);
-    exit;
+if ($origin && in_array($origin, $allowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $origin);
 } else {
-    $matchedCompany = $bestMatch['title'];
-    $category = $bestMatch['category'] ?? null;
+    header('Access-Control-Allow-Origin: https://blockza.io');
+}
+header('Access-Control-Allow-Headers: Content-Type, Authorization');
+header('Access-Control-Allow-Methods: POST, OPTIONS');
+header('Access-Control-Allow-Credentials: true');
 
-    $relatedCompanies = [];
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
 
-    if (!empty($category)) {
-        // Debug logs
-        file_put_contents('embedding_debug.log', "Looking for related companies in category: $category, excluding title: $matchedCompany\n", FILE_APPEND);
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    http_response_code(200);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo 'Blockza AI API is running.';
+    exit;
+}
 
-        $stmtRelated = $pdo->prepare("SELECT title, context FROM vector_knowledge_new WHERE category = :category AND title != :title  ORDER BY RAND()  LIMIT 5");
-        $success = $stmtRelated->execute([':category' => $category, ':title' => $matchedCompany]);
+// -------------------------------------------------------------------
+// Check configuration
+// -------------------------------------------------------------------
+if (!$OPENAI_API_KEY || !$PINECONE_API_KEY || !$PINECONE_HOST) {
+    sendJson(500, [
+        'error'   => 'CONFIG_ERROR',
+        'message' => 'Server missing OpenAI/Pinecone configuration.',
+    ]);
+}
 
-        file_put_contents('embedding_debug.log', "Query success: " . ($success ? 'yes' : 'no') . "\n", FILE_APPEND);
+// -------------------------------------------------------------------
+// Handle POST request
+// -------------------------------------------------------------------
+$payload    = json_decode(file_get_contents('php://input'), true);
+$query      = isset($payload['query']) ? trim((string)$payload['query']) : '';
+$debugMode  = !empty($payload['debug']);
 
-        $relatedCompanies = $stmtRelated->fetchAll(PDO::FETCH_ASSOC);
-        file_put_contents('embedding_debug.log', "Related Companies Fetched: " . print_r($relatedCompanies, true), FILE_APPEND);
+if ($query === '') {
+    sendJson(400, [
+        'error'   => 'INVALID_QUERY',
+        'message' => 'Please provide a question.',
+    ]);
+}
+
+try {
+    // 1. Generate embedding from OpenAI
+    $embeddingResponse = openaiPost(
+        'https://api.openai.com/v1/embeddings',
+        [
+            'input'      => $query,
+            'model'      => $OPENAI_EMBED_MODEL,
+            'dimensions' => 256,
+        ],
+        $OPENAI_API_KEY
+    );
+    $embedding = $embeddingResponse['data'][0]['embedding'] ?? null;
+    if (!$embedding || !is_array($embedding)) {
+        throw new RuntimeException('OpenAI returned an empty embedding.');
     }
 
-    // Combine main and related context
-    $relatedContext = "";
-    if (!empty($relatedCompanies)) {
-        shuffle($relatedCompanies); // optional shuffle for randomness
-        foreach ($relatedCompanies as $company) {
-            $title = $company['title'];
-            $description = strip_tags($company['context']);
+    // 2. Query Pinecone
+    $pineconeResponse = pineconePost(
+        $PINECONE_HOST . '/query',
+        [
+            'vector'          => $embedding,
+            'topK'            => 3,
+            'includeMetadata' => true,
+        ],
+        $PINECONE_API_KEY
+    );
+    $matches = isset($pineconeResponse['matches']) && is_array($pineconeResponse['matches'])
+        ? $pineconeResponse['matches'] : [];
 
-            // 🧠 Smart directory link extraction from context
-            if (preg_match('/Directory Link:\s*(https?:\/\/[^\s]+)/i', $company['context'], $matches)) {
-                $link = $matches[1];
-            } else {
-                $link = "https://pro.blockza.io/directory/" . urlencode($title); // fallback
+    $fallbackContext = buildContext($matches);
+    $chatgptResult = ask_chatgpt($query, $fallbackContext, $OPENAI_CHAT_MODEL, $OPENAI_API_KEY);
+
+    // 3. Decide which template to use and build the response from metadata
+    $primaryMatch = $matches[0] ?? [];
+    $otherMatches = array_slice($matches, 1);
+
+    $renderMode = determineResponseMode($query, $matches);
+    // 4. Metadata + related companies
+    $topMatch   = $primaryMatch;
+    $metadata   = $topMatch['metadata'] ?? [];
+    $company    = $metadata['company'] ?? $metadata['company_name'] ?? $metadata['name'] ?? $metadata['title'] ?? $metadata['slug'] ?? '';
+    $category   = $metadata['category'] ?? $metadata['category_name'] ?? $metadata['industry'] ?? $metadata['segment'] ?? '';
+    $layout = $renderMode === 'insight' ? 'general' : $renderMode;
+    $companyData = buildCompanyDataFromMatch($primaryMatch);
+    $teamMembersRaw = extractTeamMembersFromMetadata($metadata);
+    $teamData = mapTeamMembersForResponse($teamMembersRaw, $companyData['name'] ?? '');
+    $primaryPersonData = null;
+
+    if ($layout === 'team' && $teamMembersRaw) {
+        [$highlightMember, $orderedMembers] = selectTeamMemberForQuery($query, $teamMembersRaw);
+        if ($highlightMember) {
+            $primaryPersonData = formatTeamMemberForResponse(
+                $highlightMember,
+                $companyData['name'] ?? '',
+                true
+            );
+            if (empty($primaryPersonData['name'])) {
+                $primaryPersonData = null;
             }
-
-            $relatedContext .= <<<TEXT
-
-Related Company:
-Name: $title
-Description: $description
-Directory Link: $link
-
-TEXT;
+        }
+        if (!empty($orderedMembers)) {
+            $teamData = mapTeamMembersForResponse(
+                $orderedMembers,
+                $companyData['name'] ?? '',
+                $primaryPersonData && isset($primaryPersonData['name'])
+                    ? [$primaryPersonData['name']]
+                    : []
+            );
         }
     }
 
-    $fullContext = $bestMatch['context'] . $relatedContext;
+    $similarSource = $matches;
+    if (!empty($similarSource) && $layout === 'company') {
+        $similarSource = array_slice($similarSource, 1);
+    }
+    $similarCompaniesDetailed = buildSimilarCompaniesData($similarSource);
 
-// ✅ Generate smart suggestions based on query
-$suggestions = generate_suggestions($query, $matchedCompany, $category);
+    $modelData = !empty($chatgptResult['parsed']) && is_array($chatgptResult['parsed'])
+        ? $chatgptResult['parsed']
+        : [];
 
-// ✅ Get main GPT response
-$reply = ask_chatgpt($query, $fullContext);
-echo json_encode([
-    "matched" => $matchedCompany,
-    "score" => round($bestScore, 4),
-    "response" => $reply,
-    "related_companies" => $relatedCompanies,
-    "suggestions" => $suggestions
-]);
-file_put_contents("suggestion_debug.log", print_r($suggestions, true));
+    $chatgptLayout = normaliseLayout($modelData['layout'] ?? null);
+    if ($chatgptLayout !== null) {
+        $layout = $chatgptLayout;
+    }
 
-}
+    $companyData = mergeCompanyData(
+        $companyData,
+        normaliseModelCompany($modelData['company'] ?? null)
+    );
 
+    $gptCompanyDescription = valueToRichText($modelData['company']['description'] ?? ($modelData['summary']['description'] ?? ''));
+    if ($gptCompanyDescription !== '') {
+        if (!is_array($companyData)) {
+            $companyData = [];
+        }
+        $companyData['description'] = $gptCompanyDescription;
+    }
 
-function classify_query_type($query) {
-    $messages = [
+    $primaryPersonData = mergePersonData(
+        $primaryPersonData,
+        normaliseModelPerson(
+            $modelData['primaryPerson'] ?? null,
+            $companyData['name'] ?? '',
+            $layout === 'team'
+        )
+    );
+
+    $modelTeamRaw = normaliseModelTeamMembers($modelData['team'] ?? null);
+    if ($modelTeamRaw) {
+        $teamMembersRaw = mergeTeamMemberSources($teamMembersRaw, $modelTeamRaw);
+        $teamData = mapTeamMembersForResponse(
+            $teamMembersRaw,
+            $companyData['name'] ?? '',
+            $primaryPersonData && isset($primaryPersonData['name'])
+                ? [$primaryPersonData['name']]
+                : []
+        );
+    }
+
+    $similarCompaniesDetailed = mergeSimilarCompanies(
+        $similarCompaniesDetailed,
+        normaliseModelSimilarCompanies($modelData['similarCompanies'] ?? null)
+    );
+
+    $similarCompaniesDetailed = shuffleSimilarCompanies(
+        $similarCompaniesDetailed,
+        $companyData['name'] ?? ''
+    );
+
+    $summaryData = buildSummaryForLayout(
+        $layout,
         [
-            "role" => "system",
-            "content" => "You're a query classifier for a Web3 assistant. Classify this query as:
-- 'team_search' if it is asking about a person or team member,
-- 'company_search' if it asks about a company,
-- 'general_chat' if it's a general question or not related to a person or company."
-        ],
-        [
-            "role" => "user",
-            "content" => "Query: $query"
+            'company'       => $companyData,
+            'primaryPerson' => $primaryPersonData,
+            'modelSummary'  => $modelData['summary'] ?? null,
         ]
+    );
+    $sectionsData = buildSectionsForLayout($layout, $modelData);
+
+    $modelSuggestions = [];
+    if (!empty($modelData['suggestions']) && is_array($modelData['suggestions'])) {
+        foreach ($modelData['suggestions'] as $suggestion) {
+            $suggestionString = valueToPlainString($suggestion);
+            if ($suggestionString !== '') {
+                $modelSuggestions[] = $suggestionString;
+            }
+        }
+    }
+
+    $responsePayload = [
+        'layout'           => $layout,
+        'company'          => $companyData,
+        'primaryPerson'    => $primaryPersonData,
+        'team'             => array_values($teamData),
+        'similarCompanies' => $similarCompaniesDetailed,
+        'summary'          => $summaryData,
+        'sections'         => $sectionsData,
+        'suggestions'      => [],
+        'matchedCategory'  => $category ?: $company ?: '',
     ];
 
-    $ch = curl_init('https://api.openai.com/v1/chat/completions');
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POSTFIELDS => json_encode([
-            "model" => "gpt-4o",
-            "messages" => $messages
-        ]),
-        CURLOPT_HTTPHEADER => [
-            "Authorization: Bearer " . OPENAI_API_KEY,
-            "Content-Type: application/json"
-        ]
-    ]);
+    $assistantReplyContext = summariseResponseForSuggestions($responsePayload);
+    $generatedSuggestions = generate_suggestions(
+        $query,
+        $assistantReplyContext,
+        $companyData['name'] ?? '',
+        $category ?: $company ?: ''
+    );
 
-    $response = curl_exec($ch);
-    curl_close($ch);
-    $result = json_decode($response, true);
-
-    return trim(strtolower($result['choices'][0]['message']['content'] ?? 'general_chat'));
-}
-if ($type === 'team_search') {
-    $stmt = $pdo->prepare("SELECT * FROM vector_knowledge_new WHERE context LIKE :name LIMIT 1");
-    $stmt->execute([':name' => "%$query%"]);
-    $data = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if ($data) {
-        echo json_encode([
-            "matched" => $data['title'],
-            "response" => nl2br($data['context']) // Optional: clean this output if needed
-        ]);
-        exit;
+    if (!empty($generatedSuggestions)) {
+        $finalSuggestions = $generatedSuggestions;
+    } elseif (!empty($modelSuggestions)) {
+        $finalSuggestions = $modelSuggestions;
     } else {
-        echo json_encode([
-            "response" => "⚠️ Couldn't find this person. Please try with full name or verify their company."
-        ]);
-        exit;
+        $finalSuggestions = $DEFAULT_SUGGESTIONS;
+    }
+
+    $responsePayload['suggestions'] = $finalSuggestions;
+
+    if ($debugMode) {
+        $responsePayload['debug'] = [
+            'renderMode'   => $renderMode,
+            'chatgpt_raw'  => $chatgptResult['raw'] ?? null,
+            'chatgpt_error'=> $chatgptResult['error'] ?? null,
+            'matches'      => $matches,
+        ];
+    }
+
+    // 6. Send JSON response
+    sendJson(200, $responsePayload);
+
+} catch (Throwable $e) {
+    error_log('Blockza AI PHP proxy error: ' . $e->getMessage());
+    sendJson(502, [
+        'error'   => 'AI_BACKEND_ERROR',
+        'message' => $e->getMessage() ?: 'The AI service is currently unavailable.',
+    ]);
+}
+
+// -------------------------------------------------------------------
+// Helper functions
+// -------------------------------------------------------------------
+
+function sendJson(int $status, array $payload): void {
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if (!function_exists('str_starts_with')) {
+    function str_starts_with(string $haystack, string $needle): bool {
+        return $needle === '' || strpos($haystack, $needle) === 0;
     }
 }
 
-function correct_query($query) {
-    global $OPENAI_API_KEY;
+if (!function_exists('str_contains')) {
+    function str_contains(string $haystack, string $needle): bool {
+        return $needle === '' ? true : strpos($haystack, $needle) !== false;
+    }
+}
 
-    $messages = [
-        ["role" => "system", "content" => "You're an AI spell corrector. Rephrase or correct this query for better search matching, especially in crypto/Web3 context."],
-        ["role" => "user", "content" => $query]
+function blockza_contains(string $haystack, string $needle): bool {
+    return $needle === '' ? true : strpos($haystack, $needle) !== false;
+}
+
+function blockza_contains_word(string $haystack, string $needle): bool {
+    $needle = trim($needle);
+    if ($needle === '') {
+        return false;
+    }
+
+    $pattern = '/\b' . preg_quote($needle, '/') . '\b/iu';
+    return (bool)preg_match($pattern, $haystack);
+}
+
+function buildContext(array $matches): string {
+    if (empty($matches)) {
+        return '';
+    }
+
+    $chunks = [];
+    foreach ($matches as $index => $match) {
+        if (!is_array($match)) {
+            continue;
+        }
+
+        $headerParts = ['Match ' . ($index + 1)];
+        if (!empty($match['id'])) {
+            $headerParts[] = 'ID: ' . (string)$match['id'];
+        }
+        if (isset($match['score'])) {
+            $headerParts[] = 'Score: ' . number_format((float)$match['score'], 4);
+        }
+
+        $metadata = isset($match['metadata']) && is_array($match['metadata']) ? $match['metadata'] : [];
+        $metaJson = $metadata
+            ? json_encode($metadata, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+            : '';
+
+        $chunks[] = implode(' | ', $headerParts) . ($metaJson !== '' ? "\n" . $metaJson : '');
+    }
+
+    return implode("\n\n", $chunks);
+}
+
+function ask_chatgpt(string $query, string $context, string $model, string $apiKey): array {
+    $result = [
+        'raw'    => null,
+        'parsed' => null,
+        'error'  => null,
     ];
 
-    $ch = curl_init("https://api.openai.com/v1/chat/completions");
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POSTFIELDS => json_encode([
-            "model" => "gpt-4o",
-            "messages" => $messages,
-        ]),
-        CURLOPT_HTTPHEADER => [
-            "Authorization: Bearer " . $OPENAI_API_KEY,
-            "Content-Type: application/json"
-        ]
-    ]);
+    if ($model === '' || $apiKey === '') {
+        $result['error'] = 'CHATGPT_CONFIG_MISSING';
+        return $result;
+    }
 
-    $response = curl_exec($ch);
-    curl_close($ch);
-    $result = json_decode($response, true);
+    $systemPrompt = <<<EOT
+You are Blockza AI, a Web3 analyst. Reply with a single valid JSON object (no Markdown, no commentary). Use UTF-8 and keep values concise. Structure:
+{
+  "layout": "company" | "team" | "general",
+  "company": {
+    "name": string,
+    "tagline": string,
+    "description": string,
+    "category": string,
+    "location": string,
+    "website": string,
+    "directory": string,
+    "logo": string,
+    "banner": string,
+    "founded": string,
+    "teamSize": string,
+    "funding": string,
+    "focus": string,
+    "keywords": string
+  },
+  "primaryPerson": {
+    "name": string,
+    "role": string,
+    "bio": string,
+    "image": string,
+    "profileUrl": string
+  },
+  "team": [
+    {
+      "name": string,
+      "role": string,
+      "bio": string,
+      "image": string,
+      "profileUrl": string
+    }
+  ],
+  "similarCompanies": [
+    {
+      "name": string,
+      "description": string,
+      "directory": string,
+      "founder_header_banner": string,
+      "founder_logo": string
+    }
+  ],
+  "summary": {
+    "title": string,
+    "subtitle": string,
+    "description": string
+  },
+  "sections": [
+    {
+      "heading": string,
+      "body": string,
+      "bullets": [string]
+    }
+  ],
+  "suggestions": [string]
+}
+EOT;
 
-    return trim($result['choices'][0]['message']['content'] ?? $query);
+    $userPrompt = "User query: " . $query;
+    if ($context !== '') {
+        $userPrompt .= "\n\nPinecone context:\n" . $context;
+    }
+
+    $payload = [
+        'model' => $model,
+        'messages' => [
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => $userPrompt],
+        ],
+        'temperature' => 1.0,
+        'response_format' => ['type' => 'json_object'],
+    ];
+
+    try {
+        $response = httpJsonPost(
+            'https://api.openai.com/v1/chat/completions',
+            $payload,
+            ['Authorization: Bearer ' . $apiKey]
+        );
+
+        $content = $response['choices'][0]['message']['content'] ?? '';
+        if (!is_string($content) || trim($content) === '') {
+            $result['error'] = 'CHATGPT_EMPTY_RESPONSE';
+            return $result;
+        }
+
+        $result['raw'] = $content;
+        $decoded = json_decode($content, true);
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            $result['parsed'] = $decoded;
+        } else {
+            $result['error'] = 'CHATGPT_JSON_DECODE_ERROR: ' . json_last_error_msg();
+        }
+    } catch (Throwable $e) {
+        $result['error'] = $e->getMessage();
+    }
+
+    return $result;
 }
 
-function generate_suggestions($query, $matchedCompany = "", $category = "") {
-    global $OPENAI_API_KEY;
+function summariseResponseForSuggestions(array $payload): string {
+    $parts = [];
 
-    $messages = [
-    [
-        "role" => "system",
-        "content" => "You are a smart AI assistant helping users explore Blockza — a Web3 directory, discovery, and matchmaking platform.
+    $summary = $payload['summary'] ?? [];
+    if (!empty($summary['title'])) {
+        $parts[] = 'Title: ' . valueToPlainString($summary['title']);
+    }
+    if (!empty($summary['subtitle'])) {
+        $parts[] = 'Subtitle: ' . valueToPlainString($summary['subtitle']);
+    }
+    if (!empty($summary['description'])) {
+        $parts[] = 'Summary: ' . valueToPlainString($summary['description']);
+    }
 
-Your job is to generate 3 to 5 **short**, natural-sounding follow-up questions that:
+    $company = $payload['company'] ?? [];
+    if (!empty($company['name'])) {
+        $parts[] = 'Company: ' . valueToPlainString($company['name']);
+    }
+    if (!empty($company['description'])) {
+        $parts[] = 'Company Overview: ' . valueToPlainString($company['description']);
+    }
+    if (!empty($company['focus'])) {
+        $parts[] = 'Focus Areas: ' . valueToPlainString($company['focus']);
+    }
+
+    if (!empty($payload['sections']) && is_array($payload['sections'])) {
+        foreach ($payload['sections'] as $section) {
+            if (!is_array($section)) {
+                continue;
+            }
+            $heading = valueToPlainString($section['heading'] ?? '');
+            $body = valueToPlainString($section['body'] ?? '');
+
+            if ($heading !== '') {
+                $parts[] = 'Section: ' . $heading;
+            }
+            if ($body !== '') {
+                $parts[] = $body;
+            }
+        }
+    }
+
+    $text = implode("\n", array_filter($parts));
+    if ($text === '') {
+        return '';
+    }
+
+    return truncateText($text, 1200);
+}
+
+function generate_suggestions(string $query, string $assistantReply = '', string $matchedCompany = '', string $category = ''): array {
+    global $OPENAI_API_KEY, $OPENAI_CHAT_MODEL;
+
+    if ($OPENAI_API_KEY === '') {
+        return [];
+    }
+
+    $replyExcerpt = $assistantReply !== '' ? truncateText($assistantReply, 1500) : '';
+
+    $systemMessage = <<<EOT
+You are a smart AI assistant helping users explore Blockza — a Web3 directory, discovery, and matchmaking platform.
+
+Generate 3 to 5 short, natural-sounding follow-up questions that:
 - Are based on the user's original query AND the assistant's previous response.
+- Use 6 to 15 words each.
+- Sound like logical next questions.
+- Stay helpful, relevant, and subtly promote Blockza’s value (directories, meetings, visibility, tools).
+- Avoid heavy jargon or generic filler.
+- Ensure either the first or second suggestion explicitly mentions how Blockza can help.
 
-📝 Each follow-up should:
-- Be 6 to 15 words
-- Feel like a logical next question
-- Be helpful, relevant, and subtly promote Blockza’s value
-- Avoid overly technical jargon or generic phrases
+Return a JSON object: {"suggestions": ["question 1", "question 2"]}.
+EOT;
 
-Your tone should be warm, professional, and action-oriented.
-"
-    ],
-    [
-        "role" => "user",
-        "content" => "Original User Query: $query\n\nAssistant's Response: $reply\n\nCompany: $matchedCompany\nCategory: $category"
-    ]
-];
+    $userMessage = <<<EOT
+Original User Query: {$query}
 
+Assistant's Response: {$replyExcerpt}
 
+Company: {$matchedCompany}
+Category: {$category}
+EOT;
 
-    $ch = curl_init("https://api.openai.com/v1/chat/completions");
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POSTFIELDS => json_encode([
-            "model" => "gpt-4o",
-            "messages" => $messages
-        ]),
-        CURLOPT_HTTPHEADER => [
-            "Authorization: Bearer " . $OPENAI_API_KEY,
-            "Content-Type: application/json"
-        ]
-    ]);
+    $payload = [
+        'model' => $OPENAI_CHAT_MODEL ?: 'gpt-4o',
+        'messages' => [
+            ['role' => 'system', 'content' => $systemMessage],
+            ['role' => 'user', 'content' => $userMessage],
+        ],
+        'temperature' => 0.6,
+        'response_format' => ['type' => 'json_object'],
+    ];
 
-    $response = curl_exec($ch);
-    curl_close($ch);
-    $result = json_decode($response, true);
-    $text = $result['choices'][0]['message']['content'] ?? '';
-
-    // Clean the suggestion list
-    $lines = explode("\n", $text);
-    $cleaned = array_map(function($line) {
-        return trim(preg_replace('/^\d+[\.\)]\s*/', '', $line)); // removes "1. " or "1)"
-    }, $lines);
-
-    return array_filter($cleaned);
+    try {
+        $response = httpJsonPost(
+            'https://api.openai.com/v1/chat/completions',
+            $payload,
+            ['Authorization: Bearer ' . $OPENAI_API_KEY]
+        );
+        $content = $response['choices'][0]['message']['content'] ?? '';
+        if (!is_string($content) || trim($content) === '') {
+            return [];
+        }
+        $decoded = json_decode($content, true);
+        if (!is_array($decoded) || empty($decoded['suggestions']) || !is_array($decoded['suggestions'])) {
+            return [];
+        }
+        $suggestions = [];
+        foreach ($decoded['suggestions'] as $suggestion) {
+            $text = valueToPlainString($suggestion);
+            if ($text !== '') {
+                $suggestions[] = $text;
+            }
+        }
+        return array_slice($suggestions, 0, 5);
+    } catch (Throwable $e) {
+        error_log('Blockza suggestion generation failed: ' . $e->getMessage());
+        return [];
+    }
 }
 
+function blockza_is_list(array $array): bool {
+    $expectedKey = 0;
+    foreach ($array as $key => $_) {
+        if ($key !== $expectedKey) {
+            return false;
+        }
+        $expectedKey++;
+    }
+    return true;
+}
+
+function slugify(string $value): string {
+    $value = strtolower(trim($value));
+    $value = preg_replace('/[^a-z0-9]+/i', '-', $value);
+    return trim($value, '-');
+}
+
+function ensureUrl(string $value): string {
+    $trimmed = trim($value);
+    if ($trimmed === '') {
+        return '';
+    }
+    if (preg_match('/^(https?:|data:)/i', $trimmed)) {
+        return $trimmed;
+    }
+    if (str_starts_with($trimmed, '//')) {
+        return 'https:' . $trimmed;
+    }
+    if (str_starts_with($trimmed, '/')) {
+        return 'https://blockza.io' . $trimmed;
+    }
+    if (str_starts_with($trimmed, 'www.')) {
+        return 'https://' . $trimmed;
+    }
+    if (preg_match('/^[a-z0-9\-]+\.[a-z0-9\-]+/i', $trimmed)) {
+        return 'https://' . $trimmed;
+    }
+    return 'https://blockza.io/' . ltrim($trimmed, '/');
+}
+
+function sanitizeIdFragment(string $value): string {
+    $slug = preg_replace('/[^a-z0-9]+/i', '', $value);
+    return $slug !== '' ? $slug : 'Member';
+}
+
+function valueToPlainString($value): string {
+    if (is_string($value)) {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return '';
+        }
+        return trim(strip_tags($trimmed));
+    }
+    if (is_numeric($value)) {
+        return (string)$value;
+    }
+    if (is_bool($value)) {
+        return $value ? 'Yes' : 'No';
+    }
+    if (is_array($value)) {
+        $parts = [];
+        foreach ($value as $item) {
+            $str = valueToPlainString($item);
+            if ($str !== '') {
+                $parts[] = $str;
+            }
+        }
+        return $parts ? implode(', ', array_unique($parts)) : '';
+    }
+    return '';
+}
+function valueToRichText($value, array $allowedTags = ['p', 'br', 'strong', 'em', 'ul', 'ol', 'li', 'a']): string {
+    if (!is_string($value)) {
+        return valueToPlainString($value);
+    }
+    $trimmed = trim($value);
+    if ($trimmed === '') {
+        return '';
+    }
+    $allowList = '<' . implode('><', $allowedTags) . '>';
+    return trim(strip_tags($trimmed, $allowList));
+}
+
+function getMetaString(array $metadata, array $keys): string {
+    foreach ($keys as $key) {
+        foreach ($metadata as $metaKey => $value) {
+            if (!is_string($metaKey)) {
+                continue;
+            }
+            if (strcasecmp($metaKey, $key) === 0) {
+                $string = valueToPlainString($value);
+                if ($string !== '') {
+                    return $string;
+                }
+            }
+        }
+    }
+    return '';
+}
+
+function truncateText(string $value, int $limit = 280): string {
+    if ($limit <= 0) {
+        return '';
+    }
+
+    $length = function_exists('mb_strlen') ? mb_strlen($value) : strlen($value);
+    if ($length <= $limit) {
+        return $value;
+    }
+
+    $slice = function_exists('mb_substr')
+        ? mb_substr($value, 0, $limit - 1)
+        : substr($value, 0, $limit - 1);
+
+    return rtrim($slice) . '…';
+}
+
+function extractTeamMembersFromMetadata(array $metadata): array {
+    $teamKeys = ['team_members', 'teamMembers', 'team', 'leaders', 'executives', 'people', 'staff'];
+
+    foreach ($teamKeys as $key) {
+        foreach ($metadata as $metaKey => $value) {
+            if (!is_string($metaKey) || strcasecmp($metaKey, $key) !== 0) {
+                continue;
+            }
+
+            if (is_string($value)) {
+                $decoded = json_decode($value, true);
+                if (is_array($decoded)) {
+                    $value = $decoded;
+                }
+            }
+
+            if (!is_array($value)) {
+                continue;
+            }
+
+            if (isset($value['members']) && is_array($value['members'])) {
+                $value = $value['members'];
+            }
+
+            if (!blockza_is_list($value)) {
+                $value = array_values($value);
+            }
+
+            $team = [];
+            foreach ($value as $member) {
+                if (!is_array($member)) {
+                    continue;
+                }
+
+                $name = getMetaString($member, ['name', 'fullName', 'displayName']);
+                if ($name === '') {
+                    continue;
+                }
+
+                $role = getMetaString($member, ['role', 'title', 'position', 'designation', 'job_title', 'jobTitle']);
+                $description = getMetaString($member, ['description', 'bio', 'summary', 'about', 'focus']);
+                $image = ensureUrl(getMetaString($member, ['image', 'imageUrl', 'image_url', 'photo', 'photoUrl', 'photo_url', 'avatar', 'avatarUrl', 'avatar_url', 'headshot']));
+                $profileUrl = ensureUrl(getMetaString($member, ['profileUrl', 'profile_url', 'profileLink', 'profile_link', 'profile', 'link', 'page', 'url']));
+
+                $team[] = [
+                    'name'        => $name,
+                    'role'        => $role,
+                    'description' => $description,
+                    'image'       => $image,
+                    'profileUrl'  => $profileUrl,
+                ];
+            }
+
+            if ($team) {
+                return $team;
+            }
+        }
+    }
+
+    return [];
+}
+
+function buildSimilarCompaniesData(array $matches): array {
+    $items = [];
+
+    foreach ($matches as $match) {
+        if (!is_array($match)) {
+            continue;
+        }
+
+        $snapshot = normaliseCompanySnapshot($match);
+        $name = $snapshot['name'] ?? '';
+        if ($name === '') {
+            continue;
+        }
+
+        $metadata = isset($match['metadata']) && is_array($match['metadata'])
+            ? $match['metadata']
+            : [];
+
+        $banner = ensureUrl(getMetaString($metadata, [
+            'banner',
+            'Founder_header_banner',
+            'team_header_image',
+            'banner_url',
+            'bannerUrl',
+            'cover',
+            'image',
+            'image_url',
+            'imageUrl'
+        ]));
+
+        $items[] = [
+            'name'        => $name,
+            'description' => truncateText(
+        $snapshot['description'] ?: ($snapshot['tagline'] ?? ''),
+        160
+    ),
+            'directory'   => $snapshot['directory'] ?? '',
+            'banner'      => $banner,
+            'logo'        => $snapshot['logo'] ?? '',
+        ];
+    }
+
+    return $items;
+}
+
+function buildCompanyDataFromMatch(?array $match): ?array {
+    if (empty($match) || !isset($match['metadata']) || !is_array($match['metadata'])) {
+        return null;
+    }
+
+    $metadata = $match['metadata'];
+    $snapshot = normaliseCompanySnapshot($match);
+    $name = $snapshot['name'] ?? '';
+    if ($name === '') {
+        return null;
+    }
+
+    $banner = ensureUrl(getMetaString($metadata, [
+        'banner',
+        'Founder_header_banner',
+        'team_header_image',
+        'banner_url',
+        'bannerUrl',
+        'cover',
+        'cover_image',
+        'coverImage',
+        'hero',
+        'heroImage',
+        'feature_image',
+        'featureImage',
+    ]));
+
+    $founded = getMetaString($metadata, ['founded', 'founded_year', 'yearFounded', 'launched']);
+    $teamSize = getMetaString($metadata, ['team_size', 'teamSize', 'employees', 'employee_count', 'company_size']);
+    $funding = getMetaString($metadata, ['funding', 'funding_amount', 'totalFunding', 'valuation']);
+    $focus = getMetaString($metadata, ['focus', 'services', 'products', 'speciality', 'specialty', 'solutions']);
+    $keywords = getMetaString($metadata, ['keywords', 'tags', 'topics']);
+
+    $facts = [];
+    appendFact($facts, 'Category', $snapshot['category'] ?? '');
+    appendFact($facts, 'Headquarters', $snapshot['location'] ?? '');
+    appendFact($facts, 'Founded', $founded);
+    appendFact($facts, 'Team Size', $teamSize);
+    appendFact($facts, 'Funding', $funding);
+    appendFact($facts, 'Focus Areas', $focus);
+    appendFact($facts, 'Keywords', $keywords);
+
+    return [
+        'name'        => $snapshot['name'],
+        'tagline'     => $snapshot['tagline'],
+        'description' => $snapshot['description'],
+        'category'    => $snapshot['category'],
+        'location'    => $snapshot['location'],
+        'website'     => $snapshot['website'],
+        'directory'   => $snapshot['directory'],
+        'logo'        => $snapshot['logo'],
+        'banner'      => $banner,
+        'founded'     => $founded,
+        'teamSize'    => $teamSize,
+        'funding'     => $funding,
+        'focus'       => $focus,
+        'keywords'    => $keywords,
+        'facts'       => $facts,
+    ];
+}
+
+function appendFact(array &$facts, string $label, string $value): void {
+    $value = trim((string)$value);
+    if ($value === '') {
+        return;
+    }
+    $facts[] = ['label' => $label, 'value' => $value];
+}
+
+function mergeCompanyData(?array $company, ?array $modelCompany): ?array {
+    $base = $company ?? [];
+    if (!$modelCompany) {
+        return $base ?: null;
+    }
+
+    foreach ($modelCompany as $key => $value) {
+        if ($value === '' || $value === null) {
+            continue;
+        }
+        if (!array_key_exists($key, $base) || $base[$key] === '' || $base[$key] === null) {
+            $base[$key] = $value;
+        }
+    }
+
+    $base['facts'] = [];
+    appendFact($base['facts'], 'Category', $base['category'] ?? '');
+    appendFact($base['facts'], 'Headquarters', $base['location'] ?? '');
+    appendFact($base['facts'], 'Founded', $base['founded'] ?? '');
+    appendFact($base['facts'], 'Team Size', $base['teamSize'] ?? '');
+    appendFact($base['facts'], 'Funding', $base['funding'] ?? '');
+    appendFact($base['facts'], 'Focus Areas', $base['focus'] ?? '');
+    appendFact($base['facts'], 'Keywords', $base['keywords'] ?? '');
+
+    return $base ?: null;
+}
+
+function normaliseModelCompany($value): ?array {
+    if (!is_array($value)) {
+        return null;
+    }
+
+    $company = [
+        'name'        => valueToPlainString($value['name'] ?? ''),
+        'tagline'     => valueToPlainString($value['tagline'] ?? ($value['subtitle'] ?? '')),
+        'description' => valueToRichText($value['description'] ?? ($value['summary'] ?? '')),
+        'category'    => valueToPlainString($value['category'] ?? ''),
+        'location'    => valueToPlainString($value['location'] ?? ''),
+        'website'     => ensureUrl($value['website'] ?? ''),
+        'directory'   => ensureUrl($value['directory'] ?? ''),
+        'logo'        => ensureUrl($value['logo'] ?? ''),
+        'banner'      => ensureUrl($value['banner'] ?? ''),
+        'founded'     => valueToPlainString($value['founded'] ?? ''),
+        'teamSize'    => valueToPlainString($value['teamSize'] ?? ''),
+        'funding'     => valueToPlainString($value['funding'] ?? ''),
+        'focus'       => valueToPlainString($value['focus'] ?? ''),
+        'keywords'    => valueToPlainString($value['keywords'] ?? ''),
+    ];
+
+    $company = array_filter(
+        $company,
+        static function ($item) {
+            return !($item === '' || $item === null);
+        }
+    );
+
+    return $company ?: null;
+}
+
+function mergePersonData(?array $person, ?array $supplement): ?array {
+    $base = $person ?? [];
+    if (!$supplement) {
+        return $base ?: null;
+    }
+
+    foreach ($supplement as $key => $value) {
+        if ($key === 'isPrimary') {
+            $base['isPrimary'] = (!empty($base['isPrimary']) || !empty($value)) ? true : false;
+            continue;
+        }
+        if ($value === '' || $value === null) {
+            continue;
+        }
+        if (!array_key_exists($key, $base) || $base[$key] === '' || $base[$key] === null) {
+            $base[$key] = $value;
+        }
+    }
+
+    if (!empty($base['name']) && empty($base['bookMeetingId'])) {
+        $base['bookMeetingId'] = 'BookMeeting_' . sanitizeIdFragment($base['name']);
+    }
+
+    return $base ?: null;
+}
+
+function normaliseModelPerson($value, string $companyName = '', bool $isPrimary = false): ?array {
+    if (!is_array($value)) {
+        return null;
+    }
+
+    $raw = [
+        'name'        => valueToPlainString($value['name'] ?? ''),
+        'role'        => valueToPlainString($value['role'] ?? ($value['title'] ?? '')),
+        'description' => valueToPlainString($value['bio'] ?? ($value['description'] ?? '')),
+        'image'       => ensureUrl($value['image'] ?? ($value['photo'] ?? '')),
+        'profileUrl'  => ensureUrl($value['profileUrl'] ?? ($value['url'] ?? '')),
+    ];
+
+    if ($raw['name'] === '') {
+        return null;
+    }
+
+    return formatTeamMemberForResponse($raw, $companyName, $isPrimary);
+}
+
+function normaliseModelTeamMembers($value): array {
+    if (!is_array($value)) {
+        return [];
+    }
+    if (!blockza_is_list($value)) {
+        $value = array_values($value);
+    }
+
+    $result = [];
+    foreach ($value as $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+        $name = valueToPlainString($entry['name'] ?? '');
+        if ($name === '') {
+            continue;
+        }
+        $result[] = [
+            'name'        => $name,
+            'role'        => valueToPlainString($entry['role'] ?? ($entry['title'] ?? '')),
+            'description' => valueToPlainString($entry['bio'] ?? ($entry['description'] ?? '')),
+            'image'       => ensureUrl($entry['image'] ?? ($entry['photo'] ?? '')),
+            'profileUrl'  => ensureUrl($entry['profileUrl'] ?? ($entry['url'] ?? '')),
+        ];
+    }
+
+    return $result;
+}
+
+function mergeTeamMemberSources(?array $existing, array $supplement): array {
+    $existing = $existing ?? [];
+    $index = [];
+    foreach ($existing as $idx => $member) {
+        if (!is_array($member)) {
+            continue;
+        }
+        $name = strtolower($member['name'] ?? '');
+        if ($name !== '') {
+            $index[$name] = $idx;
+        }
+    }
+
+    foreach ($supplement as $member) {
+        if (!is_array($member)) {
+            continue;
+        }
+        $name = strtolower($member['name'] ?? '');
+        if ($name === '') {
+            continue;
+        }
+
+        if (isset($index[$name])) {
+            $idx = $index[$name];
+            foreach ($member as $key => $value) {
+                if ($value === '' || $value === null) {
+                    continue;
+                }
+                if (!array_key_exists($key, $existing[$idx]) || $existing[$idx][$key] === '' || $existing[$idx][$key] === null) {
+                    $existing[$idx][$key] = $value;
+                }
+            }
+        } else {
+            $existing[] = $member;
+            $index[$name] = count($existing) - 1;
+        }
+    }
+
+    return $existing;
+}
+
+function normaliseModelSimilarCompanies($value): array {
+    if (!is_array($value)) {
+        return [];
+    }
+    if (!blockza_is_list($value)) {
+        $value = array_values($value);
+    }
+
+    $result = [];
+    foreach ($value as $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+        $name = valueToPlainString($entry['name'] ?? '');
+        if ($name === '') {
+            continue;
+        }
+        $result[] = [
+            'name'        => $name,
+            'description' => valueToPlainString($entry['description'] ?? ($entry['summary'] ?? ($entry['summary_text'] ?? ''))),
+            'directory'   => ensureUrl($entry['directory'] ?? ($entry['url'] ?? '')),
+            'banner'      => ensureUrl($entry['banner'] ?? ($entry['Founder_header_banner'] ?? ($entry['image'] ?? ''))),
+            'logo'        => ensureUrl($entry['logo'] ?? ($entry['Founder_logo'] ?? '')),
+        ];
+    }
+
+    return $result;
+}
+
+function mergeSimilarCompanies(array $existing, array $supplement): array {
+    if (!$supplement) {
+        return $existing;
+    }
+
+    $index = [];
+    foreach ($existing as $idx => $company) {
+        $name = strtolower($company['name'] ?? '');
+        if ($name !== '') {
+            $index[$name] = $idx;
+        }
+    }
+
+    foreach ($supplement as $company) {
+        if (!is_array($company)) {
+            continue;
+        }
+        $name = $company['name'] ?? '';
+        if ($name === '') {
+            continue;
+        }
+        $key = strtolower($name);
+        if (isset($index[$key])) {
+            $idx = $index[$key];
+            foreach ($company as $field => $value) {
+                if ($value === '' || $value === null) {
+                    continue;
+                }
+                if (!array_key_exists($field, $existing[$idx]) || $existing[$idx][$field] === '' || $existing[$idx][$field] === null) {
+                    $existing[$idx][$field] = $value;
+                }
+            }
+        } else {
+            $existing[] = $company;
+            $index[$key] = count($existing) - 1;
+        }
+    }
+
+    return $existing;
+}
+
+function mergeCompanyPreview(array $base, array $extra): array {
+    foreach ($extra as $field => $value) {
+        if ($value === '' || $value === null) {
+            continue;
+        }
+        if (!array_key_exists($field, $base) || $base[$field] === '' || $base[$field] === null) {
+            $base[$field] = $value;
+        }
+    }
+    return $base;
+}
+
+function shuffleSimilarCompanies(array $companies, string $primaryName = '', int $limit = 6): array {
+    if (!$companies) {
+        return [];
+    }
+
+    $primaryKey = $primaryName !== '' ? slugify($primaryName) : '';
+    $unique = [];
+
+    foreach ($companies as $company) {
+        if (!is_array($company)) {
+            continue;
+        }
+        $name = trim((string)($company['name'] ?? ''));
+        if ($name === '') {
+            continue;
+        }
+        $slug = slugify($name);
+        if ($primaryKey !== '' && $slug === $primaryKey) {
+            continue;
+        }
+        if (isset($unique[$slug])) {
+            $unique[$slug] = mergeCompanyPreview($unique[$slug], $company);
+        } else {
+            $unique[$slug] = $company;
+        }
+    }
+
+    if (!$unique) {
+        return [];
+    }
+
+    $shuffled = array_values($unique);
+    shuffle($shuffled);
+
+    if ($limit > 0 && count($shuffled) > $limit) {
+        $shuffled = array_slice($shuffled, 0, $limit);
+    }
+
+    return $shuffled;
+}
+
+function mapTeamMembersForResponse(array $teamMembers, string $companyName = '', array $highlightNames = []): array {
+    $result = [];
+    $highlightLookup = array_map(
+        static function ($value) {
+            return strtolower(trim((string)$value));
+        },
+        array_filter($highlightNames, static function ($value) {
+            return trim((string)$value) !== '';
+        })
+    );
+
+    foreach ($teamMembers as $member) {
+        if (!is_array($member)) {
+            continue;
+        }
+        $formatted = formatTeamMemberForResponse(
+            $member,
+            $companyName,
+            in_array(strtolower($member['name'] ?? ''), $highlightLookup, true)
+        );
+        if ($formatted && !empty($formatted['name'])) {
+            $result[] = $formatted;
+        }
+    }
+    return $result;
+}
+
+function formatTeamMemberForResponse(array $member, string $companyName = '', bool $isPrimary = false): array {
+    $name = $member['name'] ?? '';
+    if ($name === '') {
+        return [];
+    }
+
+    $profileUrl = ensureUrl($member['profileUrl'] ?? '');
+    if ($profileUrl === '' && $name !== '') {
+        $profileUrl = 'https://blockza.io/team-member/' . rawurlencode(slugify($name));
+    }
+    if ($profileUrl === 'https://blockza.io/') {
+        $profileUrl = '';
+    }
+
+    $image = ensureUrl($member['image'] ?? '');
+
+    return [
+        'name'          => $name,
+        'role'          => $member['role'] ?? '',
+        'bio'           => truncateText($member['description'] ?? '', 280),
+        'image'         => $image,
+        'profileUrl'    => $profileUrl,
+        'bookMeetingId' => 'BookMeeting_' . sanitizeIdFragment($name),
+        'company'       => $companyName,
+        'isPrimary'     => $isPrimary,
+    ];
+}
+
+function buildSummaryForLayout(string $layout, array $context = []): array {
+    $modelSummary = isset($context['modelSummary']) && is_array($context['modelSummary'])
+        ? $context['modelSummary']
+        : [];
+
+    $modelTitle = valueToPlainString($modelSummary['title'] ?? '');
+    $modelSubtitle = valueToPlainString($modelSummary['subtitle'] ?? '');
+    $modelDescription = valueToPlainString($modelSummary['description'] ?? ($modelSummary['summary'] ?? ''));
+
+    if ($layout === 'company') {
+        $company = $context['company'] ?? [];
+        return [
+            'title'       => $company['name'] ?? $modelTitle,
+            'subtitle'    => $company['tagline'] ?? $modelSubtitle,
+            'description' => $company['description'] ?? $modelDescription,
+        ];
+    }
+
+    if ($layout === 'team') {
+        $primary = $context['primaryPerson'] ?? [];
+        return [
+            'title'       => $primary['name'] ?? $modelTitle,
+            'subtitle'    => $primary['role'] ?? $modelSubtitle,
+            'description' => $primary['bio'] ?? $modelDescription,
+        ];
+    }
+
+    return [
+        'title'       => $modelTitle !== '' ? $modelTitle : 'Blockza Insight',
+        'subtitle'    => $modelSubtitle,
+        'description' => $modelDescription,
+    ];
+}
+
+function buildSectionsForLayout(string $layout, array $modelData = []): array {
+    if ($layout !== 'general') {
+        return [];
+    }
+
+    $sections = [];
+    $rawSections = $modelData['sections'] ?? [];
+    if (!is_array($rawSections)) {
+        return [];
+    }
+    if (!blockza_is_list($rawSections)) {
+        $rawSections = array_values($rawSections);
+    }
+
+    foreach ($rawSections as $section) {
+        if (!is_array($section)) {
+            continue;
+        }
+        $heading = valueToPlainString($section['heading'] ?? '');
+        $body = valueToPlainString($section['body'] ?? ($section['summary'] ?? ''));
+
+        $bullets = [];
+        if (!empty($section['bullets']) && is_array($section['bullets'])) {
+            foreach ($section['bullets'] as $bullet) {
+                $bulletText = valueToPlainString($bullet);
+                if ($bulletText !== '') {
+                    $bullets[] = $bulletText;
+                }
+            }
+        }
+
+        if ($heading === '' && $body === '' && !$bullets) {
+            continue;
+        }
+
+        $sections[] = [
+            'heading' => $heading,
+            'body'    => $body,
+            'bullets' => $bullets,
+        ];
+    }
+
+    return $sections;
+}
+
+function normaliseLayout($value): ?string {
+    if (!is_string($value)) {
+        return null;
+    }
+    $normalized = strtolower(trim($value));
+    $allowed = ['company', 'team', 'general'];
+    return in_array($normalized, $allowed, true) ? $normalized : null;
+}
+
+function determineResponseMode(string $query, array $matches): string {
+    $plainQuery = trim($query);
+    if ($plainQuery === '') {
+        return 'company';
+    }
+    $lowerQuery = strtolower($plainQuery);
+
+    $teamMembers = collectTeamMembersFromMatches($matches);
+    foreach ($teamMembers as $member) {
+        $name = strtolower($member['name'] ?? '');
+        if ($name !== '' && stripos($plainQuery, $name) !== false) {
+            return 'team';
+        }
+
+        $parts = preg_split('/\s+/', $name);
+        foreach ($parts as $part) {
+            if (strlen($part) >= 3 && blockza_contains_word($plainQuery, $part)) {
+                return 'team';
+            }
+        }
+
+        $role = strtolower($member['role'] ?? '');
+        if ($role !== '') {
+            $roleIndicators = ['ceo', 'cto', 'cfo', 'cmo', 'coo', 'founder', 'lead', 'head', 'director'];
+            foreach ($roleIndicators as $indicator) {
+                if (blockza_contains_word($plainQuery, $indicator) && blockza_contains($role, $indicator)) {
+                    return 'team';
+                }
+            }
+        }
+    }
+
+    $teamPhraseIndicators = ['who is', 'team of', 'team from'];
+    foreach ($teamPhraseIndicators as $indicator) {
+        if (stripos($plainQuery, $indicator) !== false) {
+            return 'team';
+        }
+    }
+
+    $teamWordIndicators = ['team', 'teams', 'leaders', 'leadership', 'executives', 'employees', 'people', 'staff', 'founder', 'founders', 'profile', 'bio', 'meet'];
+    foreach ($teamWordIndicators as $indicator) {
+        if (blockza_contains_word($plainQuery, $indicator)) {
+            return 'team';
+        }
+    }
+
+    $insightIndicators = ['news', 'update', 'updates', 'opportunity', 'opportunities', 'trend', 'trends', 'compare', 'comparison', 'alternatives', 'alternative', 'partner', 'partnership', 'partners', 'project', 'projects', 'ideas', 'roadmap', 'token', 'tokenomics', 'funding', 'raise', 'investment', 'investors', 'event', 'events', 'conference', 'market', 'analysis', 'report', 'list', 'top'];
+    foreach ($insightIndicators as $indicator) {
+        if (stripos($plainQuery, $indicator) !== false) {
+            return 'insight';
+        }
+    }
+
+    return 'company';
+}
+
+function collectTeamMembersFromMatches(array $matches): array {
+    $collection = [];
+    foreach ($matches as $match) {
+        if (!is_array($match) || empty($match['metadata']) || !is_array($match['metadata'])) {
+            continue;
+        }
+        $team = extractTeamMembersFromMetadata($match['metadata']);
+        foreach ($team as $member) {
+            $collection[] = $member;
+        }
+    }
+    return $collection;
+}
+
+function selectTeamMemberForQuery(string $query, array $teamMembers): array {
+    if (!$teamMembers) {
+        return [null, []];
+    }
+
+    $plainQuery = trim($query);
+    $bestIndex = null;
+
+    foreach ($teamMembers as $index => $member) {
+        $name = strtolower($member['name'] ?? '');
+        if ($name && stripos($plainQuery, $name) !== false) {
+            $bestIndex = $index;
+            break;
+        }
+
+        $parts = preg_split('/\s+/', $name);
+        foreach ($parts as $part) {
+            if (strlen($part) >= 3 && blockza_contains_word($plainQuery, $part)) {
+                $bestIndex = $index;
+                break 2;
+            }
+        }
+
+        $role = strtolower($member['role'] ?? '');
+        if ($role !== '') {
+            $roleParts = ['ceo', 'cto', 'cfo', 'cmo', 'coo', 'founder', 'lead', 'head'];
+            foreach ($roleParts as $part) {
+                if (blockza_contains_word($plainQuery, $part) && blockza_contains($role, $part)) {
+                    $bestIndex = $index;
+                    break 2;
+                }
+            }
+        }
+    }
+
+    if ($bestIndex === null) {
+        $bestIndex = 0;
+    }
+
+    $highlight = $teamMembers[$bestIndex];
+    $ordered = $teamMembers;
+    unset($ordered[$bestIndex]);
+    array_unshift($ordered, $highlight);
+
+    return [$highlight, array_values($ordered)];
+}
+
+function normaliseCompanySnapshot(array $match): array {
+    $metadata = isset($match['metadata']) && is_array($match['metadata']) ? $match['metadata'] : [];
+
+    $name = getMetaString($metadata, ['company', 'company_name', 'companyName', 'name', 'title', 'displayName']);
+    if ($name === '') {
+        $name = valueToPlainString($match['id'] ?? '');
+    }
+
+    $tagline = getMetaString($metadata, ['tagline', 'subtitle', 'short_description', 'shortDescription', 'headline']);
+    $description = getMetaString($metadata, ['description', 'summary_text', 'Summary_text', 'overview', 'summary', 'about', 'body', 'context']);
+    $category = getMetaString($metadata, ['category', 'subcategory', 'category_name', 'industry', 'segment']);
+    $location = getMetaString($metadata, ['location', 'primary_location', 'hq', 'headquarters', 'headquarters_location', 'country', 'city', 'region']);
+    $website = ensureUrl(getMetaString($metadata, ['website', 'website_url', 'websiteUrl', 'founder_domain', 'official_site', 'officialSite', 'url']));
+    $directoryLink = ensureUrl(getMetaString($metadata, ['directoryUrl', 'directory_url', 'directoryLink', 'profile_url', 'profileUrl', 'url']));
+    if ($directoryLink === '') {
+        $directoryLink = $name !== '' ? 'https://blockza.io/directory/' . rawurlencode(slugify($name)) : '';
+    }
+    if ($directoryLink === 'https://blockza.io/') {
+        $directoryLink = '';
+    }
+    if ($website === 'https://blockza.io/') {
+        $website = '';
+    }
+
+    $logo = ensureUrl(getMetaString($metadata, ['logo', 'Founder_logo', 'founder_logo', 'logo_url', 'logoUrl', 'avatar', 'avatar_url', 'avatarUrl', 'image', 'image_url', 'imageUrl', 'icon']));
+
+    return [
+        'name'        => $name,
+        'tagline'     => $tagline,
+        'description' => $description,
+        'category'    => $category,
+        'location'    => $location,
+        'website'     => $website,
+        'directory'   => $directoryLink,
+        'logo'        => $logo,
+    ];
+}
+
+function openaiPost(string $url, array $payload, string $apiKey): array {
+    return httpJsonPost($url, $payload, [
+        'Authorization: Bearer ' . $apiKey,
+    ]);
+}
+
+function pineconePost(string $url, array $payload, string $apiKey): array {
+    return httpJsonPost($url, $payload, [
+        'Api-Key: ' . $apiKey,
+    ]);
+}
+
+function httpJsonPost(string $url, array $payload, array $extraHeaders): array {
+    $headers = array_merge([
+        'Content-Type: application/json',
+        'Accept: application/json',
+    ], $extraHeaders);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_TIMEOUT        => 45,
+    ]);
+
+    $body     = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error    = curl_error($ch);
+    curl_close($ch);
+
+    if ($body === false) {
+        throw new RuntimeException("HTTP request to {$url} failed: {$error}");
+    }
+    if ($httpCode < 200 || $httpCode >= 300) {
+        throw new RuntimeException("HTTP {$httpCode} from {$url}: {$body}");
+    }
+
+    $decoded = json_decode($body, true);
+    if (!is_array($decoded)) {
+        throw new RuntimeException("Invalid JSON from {$url}: {$body}");
+    }
+
+    return $decoded;
+}
