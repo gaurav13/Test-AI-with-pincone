@@ -1,0 +1,424 @@
+<?php
+//include 'config.php';
+$host = "localhost";
+$username = "mfjbntqvhr"; 
+$password = "ayZ7QY4wHx";
+$database = "mfjbntqvhr";
+// Match coin name or symbol from user input
+$conn = new mysqli($host, $username, $password, $database);
+$ip = $_SERVER['REMOTE_ADDR'];
+
+$OPENAI_API_KEY = '';
+$pdo = new PDO("mysql:host=localhost;dbname=mfjbntqvhr", "mfjbntqvhr", "ayZ7QY4wHx");
+
+
+
+// MAIN
+$query = $_GET['q'] ?? '';
+//$query = correct_query($query);
+if (!$query) {
+    echo json_encode(["response" => "No question received."]);
+    exit;
+}
+$type = classify_query_type($query);
+$serverTime = date('Y-m-d');
+  $stmt = $conn->prepare("SELECT message_count,ip_address,user_date FROM prediction_chat_users WHERE ip_address = ?");
+    $query = $_GET['q'];
+    $stmt->bind_param("s", $ip);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $row = $result->fetch_assoc();
+if ($row && (is_null($row['user_date']) || $serverTime !== $row['user_date'])) {
+    $stmt1 = $conn->prepare("UPDATE prediction_chat_users SET user_date = ?,message_count='0'  WHERE ip_address = ?");
+    $stmt1->bind_param("ss", $serverTime, $ip);
+    $stmt1->execute();
+	$stmt = $conn->prepare("SELECT message_count, ip_address, user_date FROM prediction_chat_users WHERE ip_address = ?");
+    $stmt->bind_param("s", $ip);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $row = $result->fetch_assoc();
+//	error_log("User Date: " . var_export($row['user_date'], true));
+//error_log("Server Date: " . $serverTime);
+
+}
+ 
+	function get_embedding($text) {
+	$OPENAI_API_KEY = '';
+    $ch = curl_init('https://api.openai.com/v1/embeddings');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POSTFIELDS => json_encode([
+            "input" => $text,
+            "model" => "text-embedding-ada-002"
+        ]),
+        CURLOPT_HTTPHEADER => [
+            "Authorization: Bearer " . $OPENAI_API_KEY,
+            "Content-Type: application/json"
+        ]
+    ]);
+    $response = curl_exec($ch);
+    curl_close($ch);
+    $data = json_decode($response, true);
+	file_put_contents('embedding_debug.log', print_r($data, true), FILE_APPEND);
+
+    return $data['data'][0]['embedding'] ?? [];
+}
+
+function cosine_similarity($a, $b) {
+    $dot = $magA = $magB = 0;
+    for ($i = 0; $i < count($a); $i++) {
+        $dot += $a[$i] * $b[$i];
+        $magA += $a[$i] ** 2;
+        $magB += $b[$i] ** 2;
+    }
+    return ($magA && $magB) ? $dot / (sqrt($magA) * sqrt($magB)) : 0;
+}
+
+function ask_chatgpt($query, $context) {
+	$OPENAI_API_KEY = '';
+$payload = [ 
+  "model" => "gpt-4o",
+  "messages" => [
+    [ 
+      "role" => "system",
+      "content" => <<<EOT
+You are a professional AI assistant for Blockza — a Web3 platform offering AI-powered company directories, partner discovery, and meeting booking.
+
+🎯 Your response must be formatted using clean Bootstrap 5-compatible HTML, styled like https://blockza.io.
+
+⚠️ IMPORTANT:
+- Your first priority is to directly and professionally answer the user's question in a clear and well structured way use bootstrap for it.
+- Use bullet points, short paragraphs, and emphasize the benefit of using Blockza features such as directory listings, meeting bookings, visibility, or tools.
+- After the main response, you may display "Similar Companies of [CATEGORY]".
+
+✅ Guidelines:
+- Use one font-size 16px and one font-family 
+- Do NOT show random company profile unless specifically asked.
+- Do NOT skip the main answer.
+- Do NOT wrap output in code blocks like ```html.
+- Avoid repeating "Sorry" or generic statements if confident context exists.
+- - If a user asks about any specific category — including: Blockchain, Web3, Crypto, DeFi, DAO, Metaverse, NFT, Blockchain Game, or AI — return a list of 15 relevant companies from that category using the Bootstrap 5-compatible HTML format provided below.
+
+<div class='d-flex align-items-center mb-3'>
+  <img src='LOGO_URL' class='me-3' style='width:60px; height:60px; border-radius:50%;'>
+  <div>
+    <h3 class='mb-1'>Company Name</h3>
+    <p class='text-muted mb-0'>Short tagline or summary of the company</p>
+  </div>
+</div>
+<p>Detailed overview of the company's mission, technology, services, and goals.</p>
+<div class='mt-3'>
+  <a href='[DirectoryLink]' target='_blank' class='btn btn-outline-primary btn-sm me-2'>View Directory</a>
+</div>
+---
+
+
+- Heading: <h4><i class="bi bi-people-fill"></i> Team</h4>
+- Inside <div class='row row-cols-1 row-cols-sm-2 row-cols-md-3 g-4'>
+- Each team member should appear as a <div class='col'> with a card:
+  - Use <div class='card text-center h-100'>
+  - Include:
+    - Profile image in <img src='IMAGE_URL'  >
+    - Full Name in <h5>
+    - Role in <p class='text-muted'>
+    - Optional description or quote in <p>
+    - Book button:
+      <strong id=\"BookMeeting_[Name]\" data-name=\"Name\" class=\"btn  btn-sm  btn-outline-primary m-2 cursor-pointer\">Book a Meeting</strong>
+ 
+
+---
+
+
+- Heading: <h4 class="pt-4"><i class="bi bi-building"></i> Similar Companies of [CATEGORY]</h4>
+<div class='row'><div class='col-12 col-sm-6 col-md-4 pb-4'>
+  <div class='card h-100 shadow-sm border-0'>
+    <!-- Optional Banner -->
+    <img src='BANNER_IMAGE_URL' class='card-img-top' alt='Company Banner'>
+
+    <div class='card-body'>
+      <h5 class='card-title mb-1'>Company Name</h5>
+      <p class='text-muted small mb-2'>Short company description...</p>
+
+      <!-- CTA -->
+      <a href='[DirectoryLink]' target='_blank' class='btn btn-outline-secondary btn-sm mt-2'>View Directory</a>
+    </div>
+  </div>
+</div>
+
+
+
+2. Related company section:
+<h4 class="pt-4"><i class="bi bi-building"></i> Similar Companies of [CATEGORY]</h4>
+<div class='row'><div class='col-12 col-sm-6 col-md-4 pb-4'>
+  <div class='card h-100 shadow-sm border-0'>
+    <img src='BANNER_IMAGE_URL' class='card-img-top' alt='Company Banner'>
+    <div class='card-body'>
+      <h5 class='card-title mb-1'>Company Name</h5>
+      <p class='text-muted small mb-2'>Short company description...</p>
+      <a href='[DirectoryLink]' target='_blank' class='btn btn-outline-secondary btn-sm mt-2'>View Directory</a>
+    </div>
+  </div>
+</div></div>
+
+🚫 Do not include personal emails, phone numbers, or LinkedIn.
+✅ Promote the “Book a Meeting” button where relevant.
+EOT
+    ],
+    [ 
+      "role" => "user",
+      "content" => "Context: $context\n\nUser question: $query"
+    ]
+  ]
+];
+
+
+
+
+
+
+
+    $ch = curl_init("https://api.openai.com/v1/chat/completions");
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POSTFIELDS => json_encode($payload),
+        CURLOPT_HTTPHEADER => [
+            "Authorization: Bearer " . $OPENAI_API_KEY,
+            "Content-Type: application/json"
+        ]
+    ]);
+    $response = curl_exec($ch);
+    curl_close($ch);
+    $data = json_decode($response, true);
+	file_put_contents('embedding_debug.log', print_r($data, true), FILE_APPEND);
+
+    return $data['choices'][0]['message']['content'] ?? "Sorry, I couldn't find the answer.";
+}
+$userEmbedding = get_embedding($query);
+
+$stmt = $pdo->prepare("SELECT * FROM vector_knowledge_new WHERE MATCH(context) AGAINST (:query IN NATURAL LANGUAGE MODE) LIMIT 30");
+$stmt->execute([':query' => $query]);
+
+$bestMatch = null;
+$bestScore = 0;
+
+while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+    $dbEmbedding = json_decode($row['embedding'], true);
+    $score = cosine_similarity($userEmbedding, $dbEmbedding);
+    if ($score > $bestScore) {
+        $bestScore = $score;
+        $bestMatch = $row;
+    }
+}
+
+if ($bestScore < 0.65 || !$bestMatch) {
+    // Fallback to full AI answer using GPT if no good embedding match found
+    $fallbackContext = "Note: The database didn't return a confident match for the user's query.\n\nTry your best to answer based on your AI knowledge. Make sure to stay relevant to the Web3 space.";
+    $reply = ask_chatgpt($query, $fallbackContext);
+
+    echo json_encode([
+        "matched" => "AI Generated",
+        "score" => round($bestScore, 4),
+        "response" => $reply,
+        "related_companies" => []
+    ]);
+    exit;
+} else {
+    $matchedCompany = $bestMatch['title'];
+    $category = $bestMatch['category'] ?? null;
+
+    $relatedCompanies = [];
+
+    if (!empty($category)) {
+        // Debug logs
+        file_put_contents('embedding_debug.log', "Looking for related companies in category: $category, excluding title: $matchedCompany\n", FILE_APPEND);
+
+        $stmtRelated = $pdo->prepare("SELECT title, context FROM vector_knowledge_new WHERE category = :category AND title != :title  ORDER BY RAND()  LIMIT 5");
+        $success = $stmtRelated->execute([':category' => $category, ':title' => $matchedCompany]);
+
+        file_put_contents('embedding_debug.log', "Query success: " . ($success ? 'yes' : 'no') . "\n", FILE_APPEND);
+
+        $relatedCompanies = $stmtRelated->fetchAll(PDO::FETCH_ASSOC);
+        file_put_contents('embedding_debug.log', "Related Companies Fetched: " . print_r($relatedCompanies, true), FILE_APPEND);
+    }
+
+    // Combine main and related context
+    $relatedContext = "";
+    if (!empty($relatedCompanies)) {
+        shuffle($relatedCompanies); // optional shuffle for randomness
+        foreach ($relatedCompanies as $company) {
+            $title = $company['title'];
+            $description = strip_tags($company['context']);
+
+            // 🧠 Smart directory link extraction from context
+            if (preg_match('/Directory Link:\s*(https?:\/\/[^\s]+)/i', $company['context'], $matches)) {
+                $link = $matches[1];
+            } else {
+                $link = "https://pro.blockza.io/directory/" . urlencode($title); // fallback
+            }
+
+            $relatedContext .= <<<TEXT
+
+Related Company:
+Name: $title
+Description: $description
+Directory Link: $link
+
+TEXT;
+        }
+    }
+
+    $fullContext = $bestMatch['context'] . $relatedContext;
+
+// ✅ Generate smart suggestions based on query
+$suggestions = generate_suggestions($query, $matchedCompany, $category);
+
+// ✅ Get main GPT response
+$reply = ask_chatgpt($query, $fullContext);
+echo json_encode([
+    "matched" => $matchedCompany,
+    "score" => round($bestScore, 4),
+    "response" => $reply,
+    "related_companies" => $relatedCompanies,
+    "suggestions" => $suggestions
+]);
+file_put_contents("suggestion_debug.log", print_r($suggestions, true));
+
+}
+
+
+function classify_query_type($query) {
+    $messages = [
+        [
+            "role" => "system",
+            "content" => "You're a query classifier for a Web3 assistant. Classify this query as:
+- 'team_search' if it is asking about a person or team member,
+- 'company_search' if it asks about a company,
+- 'general_chat' if it's a general question or not related to a person or company."
+        ],
+        [
+            "role" => "user",
+            "content" => "Query: $query"
+        ]
+    ];
+
+    $ch = curl_init('https://api.openai.com/v1/chat/completions');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POSTFIELDS => json_encode([
+            "model" => "gpt-4o",
+            "messages" => $messages
+        ]),
+        CURLOPT_HTTPHEADER => [
+            "Authorization: Bearer " . OPENAI_API_KEY,
+            "Content-Type: application/json"
+        ]
+    ]);
+
+    $response = curl_exec($ch);
+    curl_close($ch);
+    $result = json_decode($response, true);
+
+    return trim(strtolower($result['choices'][0]['message']['content'] ?? 'general_chat'));
+}
+if ($type === 'team_search') {
+    $stmt = $pdo->prepare("SELECT * FROM vector_knowledge_new WHERE context LIKE :name LIMIT 1");
+    $stmt->execute([':name' => "%$query%"]);
+    $data = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($data) {
+        echo json_encode([
+            "matched" => $data['title'],
+            "response" => nl2br($data['context']) // Optional: clean this output if needed
+        ]);
+        exit;
+    } else {
+        echo json_encode([
+            "response" => "⚠️ Couldn't find this person. Please try with full name or verify their company."
+        ]);
+        exit;
+    }
+}
+
+function correct_query($query) {
+    global $OPENAI_API_KEY;
+
+    $messages = [
+        ["role" => "system", "content" => "You're an AI spell corrector. Rephrase or correct this query for better search matching, especially in crypto/Web3 context."],
+        ["role" => "user", "content" => $query]
+    ];
+
+    $ch = curl_init("https://api.openai.com/v1/chat/completions");
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POSTFIELDS => json_encode([
+            "model" => "gpt-4o",
+            "messages" => $messages,
+        ]),
+        CURLOPT_HTTPHEADER => [
+            "Authorization: Bearer " . $OPENAI_API_KEY,
+            "Content-Type: application/json"
+        ]
+    ]);
+
+    $response = curl_exec($ch);
+    curl_close($ch);
+    $result = json_decode($response, true);
+
+    return trim($result['choices'][0]['message']['content'] ?? $query);
+}
+
+function generate_suggestions($query, $matchedCompany = "", $category = "") {
+    global $OPENAI_API_KEY;
+
+    $messages = [
+    [
+        "role" => "system",
+        "content" => "You are a smart AI assistant helping users explore Blockza — a Web3 directory, discovery, and matchmaking platform.
+
+Your job is to generate 3 to 5 **short**, natural-sounding follow-up questions that:
+- Are based on the user's original query AND the assistant's previous response.
+
+📝 Each follow-up should:
+- Be 6 to 15 words
+- Feel like a logical next question
+- Be helpful, relevant, and subtly promote Blockza’s value
+- Avoid overly technical jargon or generic phrases
+
+Your tone should be warm, professional, and action-oriented.
+"
+    ],
+    [
+        "role" => "user",
+        "content" => "Original User Query: $query\n\nAssistant's Response: $reply\n\nCompany: $matchedCompany\nCategory: $category"
+    ]
+];
+
+
+
+    $ch = curl_init("https://api.openai.com/v1/chat/completions");
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POSTFIELDS => json_encode([
+            "model" => "gpt-4o",
+            "messages" => $messages
+        ]),
+        CURLOPT_HTTPHEADER => [
+            "Authorization: Bearer " . $OPENAI_API_KEY,
+            "Content-Type: application/json"
+        ]
+    ]);
+
+    $response = curl_exec($ch);
+    curl_close($ch);
+    $result = json_decode($response, true);
+    $text = $result['choices'][0]['message']['content'] ?? '';
+
+    // Clean the suggestion list
+    $lines = explode("\n", $text);
+    $cleaned = array_map(function($line) {
+        return trim(preg_replace('/^\d+[\.\)]\s*/', '', $line)); // removes "1. " or "1)"
+    }, $lines);
+
+    return array_filter($cleaned);
+}
+
