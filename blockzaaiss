@@ -1,6 +1,8 @@
 <?php
 /**
- *
+ * Blockza AI proxy – Bootstrap 5 HTML version
+ * Save as blockzachatapi/chatapi.php and call with POST { "query": "..." }.
+ * Hitting it with GET (e.g. in a browser) just returns “API is running.”
  */
 
 ini_set('display_errors', '0');
@@ -10,12 +12,12 @@ error_reporting(E_ALL);
 // Configuration
 // -------------------------------------------------------------------
 $OPENAI_API_KEY       = trim(getenv('OPENAI_API_KEY')       ?: '');
-$OPENAI_EMBED_MODEL   = getenv('OPENAI_EMBEDDING_MODEL') ?: '';
-$OPENAI_CHAT_MODEL    = getenv('OPENAI_CHAT_MODEL')    ?: '';
+$OPENAI_EMBED_MODEL   = getenv('OPENAI_EMBEDDING_MODEL') ?: 'text-embedding-3-large';
+$OPENAI_CHAT_MODEL    = getenv('OPENAI_CHAT_MODEL')    ?: 'gpt-4o';
 $PINECONE_API_KEY     = getenv('PINECONE_API_KEY')     ?: '';
 $PINECONE_HOST        = rtrim(getenv('PINECONE_HOST') ?: '', '/');
 
-$DEFAULT_SUGGESTIONS = [
+$DEFAULT_SUGGESTIONS = [ 
     'What upcoming Web3 opportunities should I watch?',
     'How can Blockza help me discover partners faster?',
     'Which Blockza tools drive community growth?',
@@ -109,7 +111,20 @@ try {
         ? $pineconeResponse['matches'] : [];
 
     $fallbackContext = buildContext($matches);
-    $chatgptResult = ask_chatgpt($query, $fallbackContext, $OPENAI_CHAT_MODEL, $OPENAI_API_KEY);
+
+    $isBlockzaFeature = isBlockzaFeatureQuery($query);
+    $intentLayout = classifyQueryIntent($query, $OPENAI_CHAT_MODEL, $OPENAI_API_KEY);
+    if ($isBlockzaFeature) {
+        $intentLayout = 'general';
+    }
+
+    $chatgptResult = ask_chatgpt(
+        $query,
+        $fallbackContext,
+        $OPENAI_CHAT_MODEL,
+        $OPENAI_API_KEY,
+        $intentLayout
+    );
 
     // 3. Decide which template to use and build the response from metadata
     $primaryMatch = $matches[0] ?? [];
@@ -122,39 +137,46 @@ try {
     $company    = $metadata['company'] ?? $metadata['company_name'] ?? $metadata['name'] ?? $metadata['title'] ?? $metadata['slug'] ?? '';
     $category   = $metadata['category'] ?? $metadata['category_name'] ?? $metadata['industry'] ?? $metadata['segment'] ?? '';
     $layout = $renderMode === 'insight' ? 'general' : $renderMode;
-    $companyData = buildCompanyDataFromMatch($primaryMatch);
-    $teamMembersRaw = extractTeamMembersFromMetadata($metadata);
-    $teamData = mapTeamMembersForResponse($teamMembersRaw, $companyData['name'] ?? '');
     $primaryPersonData = null;
+    $companyData = null;
+    $teamMembersRaw = [];
+    $teamData = [];
+    $similarCompaniesDetailed = [];
 
-    if ($layout === 'team' && $teamMembersRaw) {
-        [$highlightMember, $orderedMembers] = selectTeamMemberForQuery($query, $teamMembersRaw);
-        if ($highlightMember) {
-            $primaryPersonData = formatTeamMemberForResponse(
-                $highlightMember,
-                $companyData['name'] ?? '',
-                true
-            );
-            if (empty($primaryPersonData['name'])) {
-                $primaryPersonData = null;
+    if (!$isBlockzaFeature) {
+        $companyData = buildCompanyDataFromMatch($primaryMatch);
+        $teamMembersRaw = extractTeamMembersFromMetadata($metadata);
+        $teamData = mapTeamMembersForResponse($teamMembersRaw, $companyData['name'] ?? '');
+
+        if ($layout === 'team' && $teamMembersRaw) {
+            [$highlightMember, $orderedMembers] = selectTeamMemberForQuery($query, $teamMembersRaw);
+            if ($highlightMember) {
+                $primaryPersonData = formatTeamMemberForResponse(
+                    $highlightMember,
+                    $companyData['name'] ?? '',
+                    true
+                );
+                if (empty($primaryPersonData['name'])) {
+                    $primaryPersonData = null;
+                }
+            }
+            if (!empty($orderedMembers)) {
+                $teamData = mapTeamMembersForResponse(
+                    $orderedMembers,
+                    $companyData['name'] ?? '',
+                    $primaryPersonData && isset($primaryPersonData['name'])
+                        ? [$primaryPersonData['name']]
+                        : []
+                );
             }
         }
-        if (!empty($orderedMembers)) {
-            $teamData = mapTeamMembersForResponse(
-                $orderedMembers,
-                $companyData['name'] ?? '',
-                $primaryPersonData && isset($primaryPersonData['name'])
-                    ? [$primaryPersonData['name']]
-                    : []
-            );
-        }
-    }
 
-    $similarSource = $matches;
-    if (!empty($similarSource) && $layout === 'company') {
-        $similarSource = array_slice($similarSource, 1);
+        $similarSource = $matches;
+        if (!empty($similarSource) && $layout === 'company') {
+            $similarSource = array_slice($similarSource, 1);
+        }
+        $similarCompaniesDetailed = buildSimilarCompaniesData($similarSource);
     }
-    $similarCompaniesDetailed = buildSimilarCompaniesData($similarSource);
 
     $modelData = !empty($chatgptResult['parsed']) && is_array($chatgptResult['parsed'])
         ? $chatgptResult['parsed']
@@ -163,6 +185,8 @@ try {
     $chatgptLayout = normaliseLayout($modelData['layout'] ?? null);
     if ($chatgptLayout !== null) {
         $layout = $chatgptLayout;
+    } elseif ($intentLayout !== null) {
+        $layout = $intentLayout;
     }
 
     $companyData = mergeCompanyData(
@@ -346,7 +370,7 @@ function buildContext(array $matches): string {
     return implode("\n\n", $chunks);
 }
 
-function ask_chatgpt(string $query, string $context, string $model, string $apiKey): array {
+function ask_chatgpt(string $query, string $context, string $model, string $apiKey, ?string $preferredLayout = null): array {
     $result = [
         'raw'    => null,
         'parsed' => null,
@@ -357,6 +381,10 @@ function ask_chatgpt(string $query, string $context, string $model, string $apiK
         $result['error'] = 'CHATGPT_CONFIG_MISSING';
         return $result;
     }
+
+    $layoutDirective = $preferredLayout !== null
+        ? "Preferred layout for this reply: {$preferredLayout}. Align the \"layout\" field and the overall response with this intent unless impossible."
+        : 'Choose the layout that best fits the query';
 
     $systemPrompt = <<<EOT
 You are Blockza AI, a Web3 analyst. Reply with a single valid JSON object (no Markdown, no commentary). Use UTF-8 and keep values concise. Structure:
@@ -417,6 +445,7 @@ You are Blockza AI, a Web3 analyst. Reply with a single valid JSON object (no Ma
   ],
   "suggestions": [string]
 }
+$layoutDirective
 EOT;
 
     $userPrompt = "User query: " . $query;
@@ -1313,6 +1342,87 @@ function normaliseLayout($value): ?string {
     $normalized = strtolower(trim($value));
     $allowed = ['company', 'team', 'general'];
     return in_array($normalized, $allowed, true) ? $normalized : null;
+}
+
+function classifyQueryIntent(string $query, string $model, string $apiKey): ?string {
+    if ($query === '' || $model === '' || $apiKey === '') {
+        return null;
+    }
+
+    $systemPrompt = <<<EOT
+Classify the user's question for Blockza AI. Reply with {"layout":"company"} or {"layout":"team"} or {"layout":"general"} only.
+- "company": user wants info on a specific company/project/product.
+- "team": user focuses on people, founders, executives, bios, leadership.
+- "general": all other requests (Blockza features, strategies, market insights, comparisons, events, opportunities, etc.).
+Never add commentary.
+EOT;
+
+    $payload = [
+        'model' => $model,
+        'messages' => [
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => $query],
+        ],
+        'temperature' => 0,
+        'response_format' => ['type' => 'json_object'],
+    ];
+
+    try {
+        $response = httpJsonPost(
+            'https://api.openai.com/v1/chat/completions',
+            $payload,
+            ['Authorization: Bearer ' . $apiKey]
+        );
+        $content = $response['choices'][0]['message']['content'] ?? '';
+        if (!is_string($content) || trim($content) === '') {
+            return null;
+        }
+        $decoded = json_decode($content, true);
+        if (!is_array($decoded)) {
+            return null;
+        }
+        return normaliseLayout($decoded['layout'] ?? null);
+    } catch (Throwable $e) {
+        error_log('Blockza layout classification failed: ' . $e->getMessage());
+        return null;
+    }
+}
+
+function isBlockzaFeatureQuery(string $query): bool {
+    $lower = strtolower($query);
+    if (strpos($lower, 'blockza') === false) {
+        return false;
+    }
+
+    $featureKeywords = [
+        'help',
+        'how',
+        'can',
+        'benefit',
+        'enhance',
+        'improve',
+        'support',
+        'assist',
+        'discover',
+        'connect',
+        'find',
+        'book',
+        'visibility',
+        'network',
+        'tools',
+        'features',
+        'opportunities',
+        'data',
+        'insights',
+    ];
+
+    foreach ($featureKeywords as $keyword) {
+        if (strpos($lower, $keyword) !== false) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function determineResponseMode(string $query, array $matches): string {
